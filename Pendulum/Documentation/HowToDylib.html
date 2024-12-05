@@ -1,0 +1,76 @@
+<html>
+<head>
+<meta charset="UTF-8">
+<body>
+<h1>How to use a C/C++ private dylib in an XCode project.</h1>
+
+<h2>1. Prepare the dylib as a "Universal" (two-architecture) dylib</h2>
+
+<p>The tool that creates Universal binaries, <b>lipo</b> (searching for it gets medical advice), sadly requires objects to combine whose relative pathnames it somehow encodes, but in the end, that doesn't derail this project. That is, if you want to create a Universal foo.dylib, you have to have two foo.dylibs (one for Intel and one for arm64) and they, as well as the output file, have to be called foo.dylib, so you need subdirs, say called arm64 and x86_64 (the official name for "Intel").  This web page explains its use:</p>
+
+       <a href="https://www.jviotti.com/2021/07/23/a-deep-dive-on-macos-universal-binaries.html">https://www.jviotti.com/2021/07/23/a-deep-dive-on-macos-universal-binaries.html</a>
+       <p>
+        This will combine two already-built for two architecture dylibs in subdirs into a Universal one:
+        <p>
+        
+           <tt>lipo x86_64/foo.dylib arm64/foo.dylib -output foo.dylib -create</tt></p>
+           
+       <p>g++ wants <tt>-DAE_CPU=AE_ARM64</tt> to create an arm64 object.</p>
+
+
+<h2>2. Insert the thing so created into the XCode project</h2>
+<p>
+This is what finally worked.  Create a subfolder <b>Libraries</b>, and add this file outright, from whatever pathname you have it stored as.  I suppose copying it into the project dir is a possible if questionable strategy. XCode will figure out that it's a "Mach-O dynamic library" without your help.  Add it to the relevant target(s) in <b>Target Memebership</b> on the right.</p>
+
+<p>
+    This should all build, but you now have to get XCode to stick the thing in the runtime packaging, which, most unfortunately, seems to require two different actions for Debug builds and Release archives.
+</p>
+
+<h2>3. For Debug builds:</h2>
+
+<p>
+    You have to get a copy of the dylib installed in the <b>Products</b> directory in the XCode temp build-tree world, i.e., the directory of which your app, its ".app", will be a subdirectory.  That's where it's going to look for it.  You can have it divulge all the places it looks by not having one and carefully reading the error message it puts in the console output window, i.e., </p>
+<pre>
+  dyld[97752]: Library not loaded: alglibARM.dylib
+  Referenced from: <A17FCCC3-20B0-3BCD-8589-ECBBE35D0126> /Users/bsg/Library/Developer/Xcode/DerivedData/Pendulum-cvrlpaauqenbfagyobyttyxftrsn/Build/Prod
+      ucts/Debug/Pendulum.app/Contents/MacOS/Pendulum.debug.dylib
+  Reason: tried: '/Users/bsg/Library/Developer/Xcode/DerivedData/Pendulum-cvrlpaauqenbfagyobyttyxftrsn/Build/Pro
+     ducts/Debug/alglibARM.dylib' (no such file),
+  '/usr/lib/system/introspection/alglibARM.dylib' (no such file, not in dyld cache),
+  'alglibARM.dylib' (no such file),
+  '/System/Volumes/Preboot/Cryptexes/OSalglibARM.dylib' (no such file),
+  'alglibARM.dylib' (no such file),
+  '/Users/bsg/Library/Developer/Xcode/DerivedData/Pendulum-cvrlpaauqenbfagyobyttyxftrsn/Build/Prod
+      ucts/Debug/alglibARM.dylib' (no such file),
+  '/usr/lib/system/introspection/alglibARM.dylib' (no such file, not in dyld cache),
+   '//alglibARM.dylib' (no such file),
+  '/System/Volumes/Preboot/Cryptexes/OS//alglibARM.dylib' (no such file),
+  '//alglibARM.dylib' (no such file)
+  Message from debugger: killed
+      
+</pre>
+      
+<p>
+      The way to create an "action" to place one is to create a "Build Phase" (select the <b>Build Phases</b> tab from the target configuration) Press + to get a new one, which is <b>Copy File</b> by default.  Add a row, which will get you a navigator dialog, in which you can find the dylib you put in the "Libraries" folder ...  select it. DO click <b>Code Sign on Co...</b>, or it all won't work. In the dropdown above the rows, select "Product Directory".  This should now all work if you click "Run", or you will get an error message like the above and have to figure it out.  But that's the basic tool for getting copies of stuff slapped in the runtime tree.
+   </p>
+
+<h2>4. For Release Builds (Archives)</h2>
+
+        <p>There are several vexing problems here.  The <b>Products</b> directory doesn't exist in a properly-installed fully built app, so the above can't be right.  Crazily, the more-general and clean solution used in this case (Release) simply does not cover the Debug case, and the above kludgery remains necessary.</p>
+
+        <p>Open/drop down the <b>Embed Libraries</b> Build Phase on the <b>Build Phases</b> tab.  It is very similar to <b>Copy Files</b>.  Add a row with the new dylib again.  Instead of <b>Product Directory</b>, which will not exist, choose <b>Resources</b>, and in the <b>Subdir</b> slot, enter <b>lib</b>.  Again, choose <b>Code Sign on Co...</b>. This will place a copy in a <b>lib</b> subdirectory of the Resources collection, as recommended by this page:</p>
+ 
+             <a href="https://forums.developer.apple.com/forums/thread/134064">https://forums.developer.apple.com/forums/thread/134064</a>
+             
+<p>The way to check that it works is to run the Debug build, then select <b>Product | Show Build Folder in Finder</b> and <b>Show Package Contents</b> of the .app in the Finder and prove that it's there.</p>
+        
+        <p>Now you have to convince the run-time linker *to look there* when the reference to the dylib is made.
+        It is not at all obvious where the linker looks by default, to chase down system-provided dylibs, and these days, I wouldn't be surprised if it's not non-wheel writable, for good reason. Old documentation says that the environment variable <b>DYLD_LIBRARY_PATH</b> should reveal it, but it doesn't; that variable is empty by default.  <i>But it is indeed used</i> (it is as though there is a read-only secret addendum added to it when it is needed.)  That page just cited reveals that you can specify environment variables in the Info-Plist, whose format and manipulation has changed a lot in recent xcodes.  What has to be done is to add</p>
+        
+            <p><tt><b>DYLD_LIBRARY_PATH=@executable_path/../Resources/lib</b></tt></p>
+
+            <p>to the runtime environment.  On the project (target) properties, go to the <b>Info</b> tag, which shows an
+            editable display of the info plist.   Click right on any row, and <b>Add Row</b>. Select <b>Environment variable</b>", and enter <b>DYLD_LIBRARY_PATH</b> in the left hand and <b>@executable_path/../Resources/lib</b> in the right. This should all build, run Debug (i.e., not break that) and <b>Build for Archive</b>, which can be installed and tested, i.e., dive into it on the finder and double-click the .app, which should come up successfully.</p>
+            
+</body>
+</html>
